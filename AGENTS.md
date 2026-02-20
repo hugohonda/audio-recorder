@@ -16,10 +16,11 @@ CLI tool to capture macOS system audio (from any source - Zoom, browser, apps) u
 ## Project Structure
 
 - `src/audio_recorder/` - Main source code
-  - `cli.py` - Click CLI entrypoint (`record`, `transcribe`, `models` commands)
+  - `cli.py` - Click CLI entrypoint (`record`, `transcribe`, `summarize`, `models` commands)
   - `capture.py` - ScreenCaptureKit audio capture logic
   - `audio.py` - Audio utilities (conversion, resampling, buffer, constants)
   - `moonshine_transcriber.py` - Live transcription with Moonshine (sliding window)
+  - `summarizer.py` - Meeting summarization via Gemini (Vertex AI)
 - `tests/` - All tests
 
 ## Local Overrides

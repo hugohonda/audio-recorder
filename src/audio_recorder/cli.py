@@ -8,6 +8,7 @@ from pathlib import Path
 import click
 
 RECORDINGS_DIR = Path(__file__).parent.parent.parent / "recordings"
+LINE = "─" * 50
 
 # MLX Whisper models (best to fastest)
 WHISPER_MODELS = {
@@ -108,7 +109,6 @@ def transcribe(audio_file: str, model: str, no_summary: bool):
     output_path = audio_path.with_suffix(".txt")
     model_path = WHISPER_MODELS[model]
     model_short = model_path.split("/")[-1]
-    line = "\u2500" * 50
 
     click.echo(f"\naudio-recorder | transcribe {audio_path.name}")
     click.echo(f"  > model: {model_short}")
@@ -120,42 +120,38 @@ def transcribe(audio_file: str, model: str, no_summary: bool):
     text = result["text"].strip()
     output_path.write_text(text)
 
-    click.echo(line)
+    click.echo(LINE)
     click.echo(text)
-    click.echo(line)
+    click.echo(LINE)
     click.echo(f"  > saved {output_path.name} ({elapsed:.1f}s)")
 
     if not no_summary and text:
-        from .summarizer import summarize
+        from .summarizer import summarize_file
 
-        summary_path = output_path.with_stem(output_path.stem + "_summary").with_suffix(".md")
-        summary = summarize(text, summary_path)
-        click.echo(line)
-        click.echo(summary)
-        click.echo(line)
+        summary = summarize_file(output_path)
+        if summary:
+            click.echo(LINE)
+            click.echo(summary)
+            click.echo(LINE)
 
 
 @main.command()
 @click.argument("transcript_file", type=click.Path(exists=True))
 def summarize(transcript_file: str):
     """Summarize a transcript file using Gemini."""
-    from .summarizer import summarize as run_summary
+    from .summarizer import summarize_file
 
     transcript_path = Path(transcript_file)
-    summary_path = transcript_path.with_stem(transcript_path.stem + "_summary").with_suffix(".md")
-    line = "\u2500" * 50
-
     click.echo(f"\naudio-recorder | summarize {transcript_path.name}")
 
-    text = transcript_path.read_text().strip()
-    if not text:
-        click.echo("  > transcript is empty, nothing to summarize")
+    summary = summarize_file(transcript_path)
+    if not summary:
+        click.echo("  > transcript is empty or summarization failed")
         return
 
-    summary = run_summary(text, summary_path)
-    click.echo(line)
+    click.echo(LINE)
     click.echo(summary)
-    click.echo(line)
+    click.echo(LINE)
 
 
 @main.command()

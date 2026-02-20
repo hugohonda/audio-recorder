@@ -128,10 +128,6 @@ class AudioRecorder:
         """Path for final Whisper transcript file."""
         return self.output_path.with_suffix(".txt")
 
-    def _summary_path(self) -> Path:
-        """Path for meeting summary file."""
-        return self.output_path.with_stem(self.output_path.stem + "_summary").with_suffix(".md")
-
     def _get_shareable_content(self):
         """Get shareable content synchronously."""
         result = {"content": None, "error": None}
@@ -389,13 +385,10 @@ class AudioRecorder:
 
     def _run_summary(self, transcript_path: Path):
         """Summarize transcript using Gemini."""
-        from .summarizer import summarize
+        from .summarizer import summarize_file
 
-        transcript = transcript_path.read_text().strip()
-        if not transcript:
-            return
-
-        summary = summarize(transcript, self._summary_path())
-        print(LINE)
-        print(summary)
-        print(LINE)
+        summary = summarize_file(transcript_path)
+        if summary:
+            print(LINE)
+            print(summary)
+            print(LINE)

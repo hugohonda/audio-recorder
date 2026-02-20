@@ -1,5 +1,6 @@
 """Meeting summarization using Gemini via Vertex AI."""
 
+import os
 import time
 from pathlib import Path
 
@@ -13,17 +14,25 @@ def _log(msg: str) -> None:
     print(f"  > {msg}")
 
 
+def summary_path_for(path: Path) -> Path:
+    """Derive the summary output path from an audio or transcript path."""
+    return path.with_stem(path.stem + "_summary").with_suffix(".md")
+
+
 def summarize(
     transcript: str,
     output_path: Path,
-    project: str = "toptal-agent-ops",
-    location: str = "us-central1",
+    project: str | None = None,
+    location: str | None = None,
 ) -> str:
     """Summarize a transcript using Gemini and write the result to output_path.
 
     Uses Vertex AI with Application Default Credentials.
     Returns the summary text.
     """
+    project = project or os.environ.get("VERTEX_PROJECT", "toptal-agent-ops")
+    location = location or os.environ.get("VERTEX_LOCATION", "us-central1")
+
     prompt_template = _PROMPT_PATH.read_text()
     prompt = prompt_template.replace("{transcript}", transcript)
 
@@ -40,3 +49,19 @@ def summarize(
     _log(f"saved {output_path.name} ({elapsed:.1f}s)")
 
     return summary
+
+
+def summarize_file(transcript_path: Path) -> str | None:
+    """Read a transcript file, summarize it, and return the summary text.
+
+    Returns None if the transcript is empty or summarization fails.
+    """
+    transcript = transcript_path.read_text().strip()
+    if not transcript:
+        return None
+
+    try:
+        return summarize(transcript, summary_path_for(transcript_path))
+    except Exception as e:
+        _log(f"summarization failed: {e}")
+        return None
