@@ -28,6 +28,7 @@ from .audio import (
     SAMPLE_RATE,
     AudioBuffer,
     float32_to_int16,
+    format_segments,
     resample,
     save_mp3,
     save_wav,
@@ -375,7 +376,9 @@ class AudioRecorder:
         )
         elapsed = time.time() - start
 
-        text = result["text"].strip()
+        text = format_segments(result.get("segments", []))
+        if not text:
+            text = result["text"].strip()
         output_txt.write_text(text)
 
         print(LINE)

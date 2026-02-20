@@ -113,11 +113,15 @@ def transcribe(audio_file: str, model: str, no_summary: bool):
     click.echo(f"\naudio-recorder | transcribe {audio_path.name}")
     click.echo(f"  > model: {model_short}")
 
+    from .audio import format_segments
+
     start = time.time()
     result = mlx_whisper.transcribe(str(audio_path), path_or_hf_repo=model_path)
     elapsed = time.time() - start
 
-    text = result["text"].strip()
+    text = format_segments(result.get("segments", []))
+    if not text:
+        text = result["text"].strip()
     output_path.write_text(text)
 
     click.echo(LINE)

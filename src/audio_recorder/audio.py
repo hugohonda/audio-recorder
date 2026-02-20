@@ -3,6 +3,7 @@
 import threading
 import wave
 from pathlib import Path
+from typing import Any
 
 import lameenc
 import numpy as np
@@ -60,6 +61,21 @@ def save_mp3(samples: np.ndarray, path: Path) -> int:
     mp3_data = encoder.encode(pcm_data) + encoder.flush()
     path.write_bytes(mp3_data)
     return path.stat().st_size
+
+
+def format_segments(segments: list[dict[str, Any]]) -> str:
+    """Format Whisper segments as timestamped transcript lines.
+
+    Each segment becomes a line like: [MM:SS] transcribed text here
+    """
+    lines = []
+    for seg in segments:
+        seconds = int(seg["start"])
+        mm, ss = divmod(seconds, 60)
+        text = seg["text"].strip()
+        if text:
+            lines.append(f"[{mm:02d}:{ss:02d}] {text}")
+    return "\n".join(lines)
 
 
 class AudioBuffer:
