@@ -1,0 +1,44 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+*.so
+.Python
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local config
+.env
+.env.local
+AGENTS.local.md
+.claude/settings.local.json
+
+# Recordings
+recordings/*
+!recordings/.gitkeep
+*.wav
+*.mp3
+*.pcm
+*.txt
+
+# macOS
+.DS_Store
