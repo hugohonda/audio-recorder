@@ -24,17 +24,28 @@ def summarize(
     output_path: Path,
     project: str | None = None,
     location: str | None = None,
+    meeting: dict | None = None,
 ) -> str:
     """Summarize a transcript using Gemini and write the result to output_path.
 
     Uses Vertex AI with Application Default Credentials.
+    If meeting metadata is provided, it is injected into the prompt for context.
     Returns the summary text.
     """
     project = project or os.environ.get("VERTEX_PROJECT", "toptal-agent-ops")
     location = location or os.environ.get("VERTEX_LOCATION", "us-central1")
 
     prompt_template = _PROMPT_PATH.read_text()
-    prompt = prompt_template.replace("{transcript}", transcript)
+
+    if meeting:
+        from .meeting import format_meeting_context
+
+        meeting_context = format_meeting_context(meeting)
+    else:
+        meeting_context = ""
+
+    prompt = prompt_template.replace("{meeting_context}", meeting_context)
+    prompt = prompt.replace("{transcript}", transcript)
 
     _log(f"summarizing with {_MODEL}...")
 
@@ -51,7 +62,7 @@ def summarize(
     return summary
 
 
-def summarize_file(transcript_path: Path) -> str | None:
+def summarize_file(transcript_path: Path, meeting: dict | None = None) -> str | None:
     """Read a transcript file, summarize it, and return the summary text.
 
     Returns None if the transcript is empty or summarization fails.
@@ -61,7 +72,7 @@ def summarize_file(transcript_path: Path) -> str | None:
         return None
 
     try:
-        return summarize(transcript, summary_path_for(transcript_path))
+        return summarize(transcript, summary_path_for(transcript_path), meeting=meeting)
     except Exception as e:
         _log(f"summarization failed: {e}")
         return None

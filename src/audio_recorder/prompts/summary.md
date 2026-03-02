@@ -69,6 +69,8 @@ Write this entire section in Brazilian Portuguese. This is a focused executive s
   - **[Descrição da tarefa]** — Responsável: [nome ou "não atribuído"] | Prazo: [data ou "não especificado"] | Ref: `[MM:SS]`
 - If none of the topics above appear in the transcript, write: "Nenhum conteúdo relevante identificado nesta reunião."
 
+{meeting_context}
+
 ## Transcript
 
 {transcript}

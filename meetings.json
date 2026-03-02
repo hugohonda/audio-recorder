@@ -1,0 +1,60 @@
+{
+  "meetings": [
+    {
+      "name": "Agent Ops Daily",
+      "description": "Daily standup for the Agent Ops team",
+      "recurrence": "daily_weekdays",
+      "start_time": "11:00",
+      "end_time": "11:25",
+      "participants": [
+        "Stefano Benatti",
+        "Alejandro Hernández",
+        "Alexey Pelykh",
+        "Charlie Holland",
+        "Diogo Takeuchi",
+        "Ilya Gubich",
+        "Jimmy Zebfred",
+        "Hugo Honda",
+        "Aleksandar Loncar",
+        "Arturo Rojas",
+        "Denis Usanov",
+        "Igor Rudych",
+        "Joseph OBrien"
+      ]
+    },
+    {
+      "name": "Expert Crowd - English Assessment",
+      "description": "Weekly sync on English assessment progress and expert crowd evaluation",
+      "recurrence": "weekly",
+      "day": "thursday",
+      "start_time": "10:30",
+      "end_time": "11:00",
+      "participants": [
+        "Sam Pigott",
+        "Aleksandar Loncar",
+        "Hugo Honda",
+        "Jasna Mitic",
+        "Kate Mendoza",
+        "Stefano Benatti"
+      ]
+    },
+    {
+      "name": "Leads Sync - EC/AOPs",
+      "description": "Weekly leads sync for Expert Crowd and Agent Ops",
+      "recurrence": "weekly",
+      "day": "monday",
+      "start_time": "15:00",
+      "end_time": "15:30",
+      "participants": [
+        "Sam Pigott",
+        "Hugo Honda",
+        "Jonathan Lau",
+        "Raymond Kaminski",
+        "Stefano Benatti",
+        "Christian Lerke",
+        "Claude Grenier",
+        "Omar Beglerovic"
+      ]
+    }
+  ]
+}

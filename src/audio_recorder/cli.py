@@ -8,6 +8,7 @@ from pathlib import Path
 import click
 
 RECORDINGS_DIR = Path(__file__).parent.parent.parent / "recordings"
+MEETINGS_PATH = Path(__file__).parent.parent.parent / "meetings.json"
 LINE = "─" * 50
 
 # MLX Whisper models (best to fastest)
@@ -80,6 +81,19 @@ def record(
 
     output = output or default_output_path()
 
+    # Try to match a meeting from meetings.json
+    meeting = None
+    if MEETINGS_PATH.exists():
+        try:
+            from .meeting import find_active_meeting, load_meetings
+
+            meetings = load_meetings(MEETINGS_PATH)
+            meeting = find_active_meeting(meetings)
+            if meeting:
+                click.echo(f"  > meeting detected: {meeting['name']}")
+        except Exception as e:
+            click.echo(f"  > warning: failed to load meetings.json: {e}")
+
     recorder = AudioRecorder(
         output_path=output,
         include_mic=not no_mic,
@@ -87,6 +101,7 @@ def record(
         final_transcribe=not no_final,
         whisper_model=WHISPER_MODELS[model],
         summarize=not no_summary,
+        meeting=meeting,
     )
     recorder.start(duration=duration)
 
@@ -141,14 +156,29 @@ def transcribe(audio_file: str, model: str, no_summary: bool):
 
 @main.command()
 @click.argument("transcript_file", type=click.Path(exists=True))
-def summarize(transcript_file: str):
+@click.option("--meeting", "meeting_path", type=click.Path(exists=True), default=None, help="Path to meetings.json for context")
+def summarize(transcript_file: str, meeting_path: str | None):
     """Summarize a transcript file using Gemini."""
     from .summarizer import summarize_file
 
     transcript_path = Path(transcript_file)
     click.echo(f"\naudio-recorder | summarize {transcript_path.name}")
 
-    summary = summarize_file(transcript_path)
+    meeting = None
+    if meeting_path:
+        try:
+            from .meeting import find_active_meeting, load_meetings
+
+            meetings = load_meetings(meeting_path)
+            meeting = find_active_meeting(meetings)
+            if meeting:
+                click.echo(f"  > meeting context: {meeting['name']}")
+            else:
+                click.echo("  > no matching meeting found for current time")
+        except Exception as e:
+            click.echo(f"  > warning: failed to load meeting file: {e}")
+
+    summary = summarize_file(transcript_path, meeting=meeting)
     if not summary:
         click.echo("  > transcript is empty or summarization failed")
         return

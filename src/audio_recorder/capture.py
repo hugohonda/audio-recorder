@@ -97,6 +97,7 @@ class AudioRecorder:
         final_transcribe: bool = True,
         whisper_model: str = "mlx-community/distil-whisper-large-v3",
         summarize: bool = True,
+        meeting: dict | None = None,
     ):
         self.output_path = Path(output_path)
         self.include_mic = include_mic
@@ -104,6 +105,7 @@ class AudioRecorder:
         self.final_transcribe = final_transcribe
         self.whisper_model = whisper_model
         self.summarize = summarize
+        self.meeting = meeting
 
         self.stream: SCStream | None = None
         self.output_handler: AudioStreamOutput | None = None
@@ -390,7 +392,7 @@ class AudioRecorder:
         """Summarize transcript using Gemini."""
         from .summarizer import summarize_file
 
-        summary = summarize_file(transcript_path)
+        summary = summarize_file(transcript_path, meeting=self.meeting)
         if summary:
             print(LINE)
             print(summary)
