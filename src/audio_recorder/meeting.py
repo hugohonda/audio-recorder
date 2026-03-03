@@ -113,12 +113,14 @@ def format_meeting_context(meeting: dict) -> str:
         for item in meeting["agenda"]:
             lines.append(f"  - {item}")
 
-    lines.extend([
-        "",
-        "Use this context to improve your summary:",
-        "- Attribute statements to the listed participants when possible based on voice/context clues",
-        "- Track which agenda items were covered and which were skipped",
-        "- Note any significant off-agenda topics that came up",
-    ])
+    lines.extend(
+        [
+            "",
+            "Use this context to improve your summary:",
+            "- Attribute statements to the listed participants when possible based on voice/context clues",
+            "- Track which agenda items were covered and which were skipped",
+            "- Note any significant off-agenda topics that came up",
+        ]
+    )
 
     return "\n".join(lines)

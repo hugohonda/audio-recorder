@@ -78,6 +78,57 @@ def format_segments(segments: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def detect_speech_segments(
+    audio_path: Path,
+    threshold: float = 0.5,
+    min_speech_duration_ms: int = 500,
+    min_silence_duration_ms: int = 300,
+    speech_pad_ms: int = 100,
+) -> list[tuple[float, float]]:
+    """Detect speech segments using Silero VAD.
+
+    Uses a neural-network-based voice activity detector for accurate
+    speech detection. Designed for mic recordings where most of the
+    audio is silence.
+
+    Returns list of (start_seconds, end_seconds) tuples.
+    """
+    from silero_vad import get_speech_timestamps, load_silero_vad, read_audio
+
+    model = load_silero_vad()
+    wav = read_audio(str(audio_path), sampling_rate=SAMPLE_RATE)
+
+    timestamps = get_speech_timestamps(
+        wav,
+        model,
+        sampling_rate=SAMPLE_RATE,
+        threshold=threshold,
+        min_speech_duration_ms=min_speech_duration_ms,
+        min_silence_duration_ms=min_silence_duration_ms,
+        speech_pad_ms=speech_pad_ms,
+        return_seconds=True,
+    )
+
+    return [(ts["start"], ts["end"]) for ts in timestamps]
+
+
+def filter_segments_by_speech(
+    segments: list[dict[str, Any]],
+    speech_ranges: list[tuple[float, float]],
+) -> list[dict[str, Any]]:
+    """Keep only Whisper segments that overlap with detected speech ranges."""
+    if not speech_ranges:
+        return []
+    filtered = []
+    for seg in segments:
+        mid = (seg["start"] + seg["end"]) / 2
+        for start, end in speech_ranges:
+            if start <= mid <= end:
+                filtered.append(seg)
+                break
+    return filtered
+
+
 class AudioBuffer:
     """Thread-safe buffer that collects raw audio bytes.
 

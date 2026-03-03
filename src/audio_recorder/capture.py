@@ -27,6 +27,8 @@ from .audio import (
     MIC_SAMPLE_RATE,
     SAMPLE_RATE,
     AudioBuffer,
+    detect_speech_segments,
+    filter_segments_by_speech,
     float32_to_int16,
     format_segments,
     resample,
@@ -363,6 +365,14 @@ class AudioRecorder:
             if transcript_path.exists():
                 self._run_summary(transcript_path)
 
+    def _mic_audio_path(self) -> Path:
+        """Path for mic audio file."""
+        return self.output_path.with_stem(self.output_path.stem + "_mic")
+
+    def _mic_transcript_path(self) -> Path:
+        """Path for mic transcript file."""
+        return self._mic_audio_path().with_suffix(".txt")
+
     def _run_final_transcription(self):
         """Run MLX Whisper on the saved audio for high-quality transcript."""
         import mlx_whisper
@@ -388,11 +398,47 @@ class AudioRecorder:
         print(LINE)
         _log(f"saved {output_txt.name} ({elapsed:.1f}s)")
 
+        # Transcribe mic audio if it exists
+        mic_path = self._mic_audio_path()
+        if mic_path.exists():
+            mic_txt = self._mic_transcript_path()
+
+            _log("detecting speech in mic audio...")
+            speech_ranges = detect_speech_segments(mic_path)
+            if not speech_ranges:
+                _log("no speech detected in mic audio, skipping")
+                return
+
+            _log(f"transcribing mic with {model_short}...")
+            start = time.time()
+            mic_result = mlx_whisper.transcribe(
+                str(mic_path),
+                path_or_hf_repo=self.whisper_model,
+                condition_on_previous_text=False,
+            )
+            mic_elapsed = time.time() - start
+
+            segments = mic_result.get("segments", [])
+            segments = filter_segments_by_speech(segments, speech_ranges)
+            mic_text = format_segments(segments)
+            if mic_text:
+                mic_txt.write_text(mic_text)
+                _log(f"saved {mic_txt.name} ({mic_elapsed:.1f}s)")
+            else:
+                _log("no speech segments after filtering")
+
     def _run_summary(self, transcript_path: Path):
         """Summarize transcript using Gemini."""
         from .summarizer import summarize_file
 
-        summary = summarize_file(transcript_path, meeting=self.meeting)
+        mic_transcript = None
+        mic_txt = self._mic_transcript_path()
+        if mic_txt.exists():
+            mic_transcript = mic_txt.read_text().strip() or None
+
+        summary = summarize_file(
+            transcript_path, meeting=self.meeting, mic_transcript=mic_transcript
+        )
         if summary:
             print(LINE)
             print(summary)

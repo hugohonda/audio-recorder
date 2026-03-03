@@ -71,6 +71,8 @@ Write this entire section in Brazilian Portuguese. This is a focused executive s
 
 {meeting_context}
 
+{mic_transcript_section}
+
 ## Transcript
 
 {transcript}

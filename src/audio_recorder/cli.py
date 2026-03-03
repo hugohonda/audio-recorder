@@ -128,7 +128,11 @@ def transcribe(audio_file: str, model: str, no_summary: bool):
     click.echo(f"\naudio-recorder | transcribe {audio_path.name}")
     click.echo(f"  > model: {model_short}")
 
-    from .audio import format_segments
+    from .audio import (
+        detect_speech_segments,
+        filter_segments_by_speech,
+        format_segments,
+    )
 
     start = time.time()
     result = mlx_whisper.transcribe(str(audio_path), path_or_hf_repo=model_path)
@@ -144,10 +148,38 @@ def transcribe(audio_file: str, model: str, no_summary: bool):
     click.echo(LINE)
     click.echo(f"  > saved {output_path.name} ({elapsed:.1f}s)")
 
+    # Transcribe mic audio if it exists
+    mic_path = audio_path.with_stem(audio_path.stem + "_mic")
+    mic_transcript = None
+    if mic_path.exists():
+        mic_txt = mic_path.with_suffix(".txt")
+
+        click.echo("  > detecting speech in mic audio...")
+        speech_ranges = detect_speech_segments(mic_path)
+        if not speech_ranges:
+            click.echo("  > no speech detected in mic audio, skipping")
+        else:
+            click.echo(f"  > transcribing mic with {model_short}...")
+            mic_start = time.time()
+            mic_result = mlx_whisper.transcribe(
+                str(mic_path),
+                path_or_hf_repo=model_path,
+                condition_on_previous_text=False,
+            )
+            mic_elapsed = time.time() - mic_start
+
+            segments = mic_result.get("segments", [])
+            segments = filter_segments_by_speech(segments, speech_ranges)
+            mic_text = format_segments(segments)
+            if mic_text:
+                mic_txt.write_text(mic_text)
+                click.echo(f"  > saved {mic_txt.name} ({mic_elapsed:.1f}s)")
+                mic_transcript = mic_text
+
     if not no_summary and text:
         from .summarizer import summarize_file
 
-        summary = summarize_file(output_path)
+        summary = summarize_file(output_path, mic_transcript=mic_transcript)
         if summary:
             click.echo(LINE)
             click.echo(summary)
@@ -156,7 +188,13 @@ def transcribe(audio_file: str, model: str, no_summary: bool):
 
 @main.command()
 @click.argument("transcript_file", type=click.Path(exists=True))
-@click.option("--meeting", "meeting_path", type=click.Path(exists=True), default=None, help="Path to meetings.json for context")
+@click.option(
+    "--meeting",
+    "meeting_path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to meetings.json for context",
+)
 def summarize(transcript_file: str, meeting_path: str | None):
     """Summarize a transcript file using Gemini."""
     from .summarizer import summarize_file
@@ -178,7 +216,17 @@ def summarize(transcript_file: str, meeting_path: str | None):
         except Exception as e:
             click.echo(f"  > warning: failed to load meeting file: {e}")
 
-    summary = summarize_file(transcript_path, meeting=meeting)
+    # Check for mic transcript
+    mic_transcript = None
+    mic_txt = transcript_path.with_stem(
+        transcript_path.stem.replace("_mic", "") + "_mic"
+    ).with_suffix(".txt")
+    if mic_txt.exists() and mic_txt != transcript_path:
+        mic_transcript = mic_txt.read_text().strip() or None
+        if mic_transcript:
+            click.echo(f"  > using mic transcript: {mic_txt.name}")
+
+    summary = summarize_file(transcript_path, meeting=meeting, mic_transcript=mic_transcript)
     if not summary:
         click.echo("  > transcript is empty or summarization failed")
         return

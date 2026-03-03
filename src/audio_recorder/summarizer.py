@@ -19,17 +19,41 @@ def summary_path_for(path: Path) -> Path:
     return path.with_stem(path.stem + "_summary").with_suffix(".md")
 
 
+_MIC_TRANSCRIPT_SECTION = (
+    "## Hugo's Microphone Transcript\n"
+    "\n"
+    "The following transcript was captured directly from Hugo's microphone "
+    "during the meeting. It contains only Hugo's voice, recorded in isolation "
+    "from other participants.\n"
+    "\n"
+    "**How to use this:**\n"
+    "- Cross-reference these timestamps with the main transcript to identify "
+    "which statements are Hugo's.\n"
+    "- Attribute statements that match (or closely match) the mic transcript "
+    "content to Hugo.\n"
+    "- By elimination, attribute other statements to other participants.\n"
+    "- The mic transcript timings may not align perfectly with the main "
+    "transcript — use content matching as the primary signal.\n"
+    "\n"
+    "```\n"
+    "{mic_transcript}\n"
+    "```"
+)
+
+
 def summarize(
     transcript: str,
     output_path: Path,
     project: str | None = None,
     location: str | None = None,
     meeting: dict | None = None,
+    mic_transcript: str | None = None,
 ) -> str:
     """Summarize a transcript using Gemini and write the result to output_path.
 
     Uses Vertex AI with Application Default Credentials.
     If meeting metadata is provided, it is injected into the prompt for context.
+    If mic_transcript is provided, it is injected to help with speaker attribution.
     Returns the summary text.
     """
     project = project or os.environ.get("VERTEX_PROJECT", "toptal-agent-ops")
@@ -44,7 +68,13 @@ def summarize(
     else:
         meeting_context = ""
 
+    if mic_transcript:
+        mic_section = _MIC_TRANSCRIPT_SECTION.replace("{mic_transcript}", mic_transcript)
+    else:
+        mic_section = ""
+
     prompt = prompt_template.replace("{meeting_context}", meeting_context)
+    prompt = prompt.replace("{mic_transcript_section}", mic_section)
     prompt = prompt.replace("{transcript}", transcript)
 
     _log(f"summarizing with {_MODEL}...")
@@ -62,7 +92,11 @@ def summarize(
     return summary
 
 
-def summarize_file(transcript_path: Path, meeting: dict | None = None) -> str | None:
+def summarize_file(
+    transcript_path: Path,
+    meeting: dict | None = None,
+    mic_transcript: str | None = None,
+) -> str | None:
     """Read a transcript file, summarize it, and return the summary text.
 
     Returns None if the transcript is empty or summarization fails.
@@ -72,7 +106,12 @@ def summarize_file(transcript_path: Path, meeting: dict | None = None) -> str | 
         return None
 
     try:
-        return summarize(transcript, summary_path_for(transcript_path), meeting=meeting)
+        return summarize(
+            transcript,
+            summary_path_for(transcript_path),
+            meeting=meeting,
+            mic_transcript=mic_transcript,
+        )
     except Exception as e:
         _log(f"summarization failed: {e}")
         return None
