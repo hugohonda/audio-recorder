@@ -1,11 +1,10 @@
-"""Audio capture using ScreenCaptureKit."""
+"""Audio capture using macOS ScreenCaptureKit."""
 
 import sys
 import threading
 import time
 from pathlib import Path
 
-import numpy as np
 import objc
 from CoreMedia import (
     CMBlockBufferCopyDataBytes,
@@ -27,25 +26,18 @@ from .audio import (
     MIC_SAMPLE_RATE,
     SAMPLE_RATE,
     AudioBuffer,
-    detect_speech_segments,
-    filter_segments_by_speech,
     float32_to_int16,
-    format_segments,
     resample,
     save_mp3,
     save_wav,
 )
+from .transcribe import format_transcript, transcribe_audio
 
 LINE = "─" * 50
 
 
-def _log(msg: str) -> None:
-    """Print a system log line with prefix."""
-    print(f"  > {msg}")
-
-
 class AudioStreamOutput(NSObject):
-    """Output handler for audio stream from ScreenCaptureKit."""
+    """Handle incoming audio from ScreenCaptureKit."""
 
     def initWithSystemBuffer_micBuffer_(self, system_buffer, mic_buffer):
         self = objc.super(AudioStreamOutput, self).init()
@@ -56,93 +48,252 @@ class AudioStreamOutput(NSObject):
         return self
 
     def stream_didOutputSampleBuffer_ofType_(self, stream, sample_buffer, output_type):
-        """Handle incoming audio sample buffer."""
         if output_type not in (SCStreamOutputTypeAudio, SCStreamOutputTypeMicrophone):
             return
 
         try:
             block_buffer = CMSampleBufferGetDataBuffer(sample_buffer)
-            if block_buffer is None:
+            if not block_buffer:
                 return
 
             data_length = CMBlockBufferGetDataLength(block_buffer)
-            if data_length == 0:
+            if not data_length:
                 return
 
             status, audio_data = CMBlockBufferCopyDataBytes(block_buffer, 0, data_length, None)
             if status != 0:
                 return
 
-            audio_bytes = bytes(audio_data)
             if output_type == SCStreamOutputTypeAudio:
-                self._system_buffer.add(audio_bytes)
+                self._system_buffer.add(bytes(audio_data))
             else:
-                self._mic_buffer.add(audio_bytes)
+                self._mic_buffer.add(bytes(audio_data))
 
         except Exception as e:
-            _log(f"error: {e}")
+            print(f"  > error: {e}")
 
     def stream_didStopWithError_(self, stream, error):
-        """Handle stream stop."""
         if error:
-            _log(f"stream error: {error.localizedDescription()}")
+            print(f"  > stream error: {error.localizedDescription()}")
 
 
 class AudioRecorder:
-    """Records system audio + microphone using ScreenCaptureKit."""
+    """Record system audio + microphone."""
 
     def __init__(
         self,
         output_path: str,
         include_mic: bool = True,
-        live_transcribe: bool = False,
-        final_transcribe: bool = True,
-        whisper_model: str = "mlx-community/distil-whisper-large-v3",
+        live: bool = False,
+        final: bool = True,
+        model: str = "mlx-community/distil-whisper-large-v3",
         summarize: bool = True,
-        meeting: dict | None = None,
         language: str = "en",
     ):
         self.output_path = Path(output_path)
         self.include_mic = include_mic
-        self.live_transcribe = live_transcribe
-        self.final_transcribe = final_transcribe
-        self.whisper_model = whisper_model
+        self.live = live
+        self.final = final
+        self.model = model
         self.summarize = summarize
-        self.meeting = meeting
         self.language = language
 
-        self.stream: SCStream | None = None
-        self.output_handler: AudioStreamOutput | None = None
-        self._system_buffer: AudioBuffer | None = None
-        self._mic_buffer: AudioBuffer | None = None
-        self._is_running = False
-
-        # Live transcription
+        self.stream = None
+        self._system_buffer = None
+        self._mic_buffer = None
+        self._running = False
         self._transcriber = None
-        if live_transcribe:
-            live_path = self._live_transcript_path()
 
-            # Use Moonshine for English, Whisper for other languages
-            if language == "en":
-                from .moonshine_transcriber import MoonshineTranscriber
-                self._transcriber = MoonshineTranscriber(
-                    output_path=live_path,
+        # Setup live transcription
+        if live:
+            from .live import LiveTranscriber
+
+            live_path = self.output_path.with_stem(f"{self.output_path.stem}_live").with_suffix(".txt")
+            self._transcriber = LiveTranscriber(language=language, output_path=live_path)
+
+    def start(self, duration: int | None = None):
+        """Start recording."""
+        self._system_buffer = AudioBuffer()
+        self._mic_buffer = AudioBuffer()
+
+        # Header
+        mode = "system + mic" if self.include_mic else "system only"
+        parts = [mode]
+        if self._transcriber:
+            engine = "moonshine" if self.language == "en" else f"whisper-tiny ({self.language})"
+            parts.append(f"live ({engine})")
+        if self.final:
+            parts.append(self.model.split("/")[-1])
+
+        print(f"\naudio-recorder | {', '.join(parts)}")
+
+        # Preload live model
+        if self._transcriber:
+            model_name = "moonshine" if self.language == "en" else f"whisper-tiny ({self.language})"
+            sys.stdout.write(f"  > loading {model_name}... ")
+            sys.stdout.flush()
+            load_time = self._transcriber.load_model()
+            print(f"ready ({load_time:.1f}s)")
+
+        # Setup stream
+        content = self._get_shareable_content()
+        displays = content.displays()
+        if not displays:
+            raise RuntimeError("No displays found")
+
+        content_filter = SCContentFilter.alloc().initWithDisplay_excludingWindows_(displays[0], [])
+
+        config = SCStreamConfiguration.alloc().init()
+        config.setCapturesAudio_(True)
+        config.setExcludesCurrentProcessAudio_(False)
+        if self.include_mic:
+            config.setCaptureMicrophone_(True)
+        config.setWidth_(2)
+        config.setHeight_(2)
+        config.setSampleRate_(SAMPLE_RATE)
+        config.setChannelCount_(CHANNELS)
+
+        handler = AudioStreamOutput.alloc().initWithSystemBuffer_micBuffer_(
+            self._system_buffer, self._mic_buffer
+        )
+        self.stream = SCStream.alloc().initWithFilter_configuration_delegate_(
+            content_filter, config, handler
+        )
+
+        self.stream.addStreamOutput_type_sampleHandlerQueue_error_(
+            handler, SCStreamOutputTypeAudio, None, objc.nil
+        )
+        if self.include_mic:
+            self.stream.addStreamOutput_type_sampleHandlerQueue_error_(
+                handler, SCStreamOutputTypeMicrophone, None, objc.nil
+            )
+
+        self._start_stream()
+        self._running = True
+
+        print(f"  > recording to {self.output_path.name} (ctrl+c to stop)")
+        print(LINE)
+
+        try:
+            self._run_loop(duration)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.stop()
+
+    def _run_loop(self, duration: int | None):
+        """Main recording loop."""
+        start = time.monotonic()
+        last_update = start
+        interval = self._transcriber.update_interval if self._transcriber else 3.0
+
+        while self._running:
+            time.sleep(0.1)
+            now = time.monotonic()
+
+            if duration and (now - start) >= duration:
+                break
+
+            if self._transcriber and (now - last_update) >= interval:
+                text, _ = self._transcriber.process_buffer(
+                    self._system_buffer.get_range_np,
+                    self._system_buffer.length(),
                 )
-            else:
-                from .whisper_live_transcriber import WhisperLiveTranscriber
-                self._transcriber = WhisperLiveTranscriber(
-                    model_name="mlx-community/whisper-tiny-mlx",
-                    language=language,
-                    output_path=live_path,
-                )
+                if text:
+                    print(text)
+                last_update = now
 
-    def _live_transcript_path(self) -> Path:
-        """Path for live transcript file."""
-        return self.output_path.with_stem(self.output_path.stem + "_live").with_suffix(".txt")
+        # Final live update
+        if self._transcriber:
+            text, _ = self._transcriber.process_buffer_sync(
+                self._system_buffer.get_range_np,
+                self._system_buffer.length(),
+            )
+            if text:
+                print(text)
 
-    def _final_transcript_path(self) -> Path:
-        """Path for final Whisper transcript file."""
-        return self.output_path.with_suffix(".txt")
+    def stop(self):
+        """Stop recording and process audio."""
+        if not self._running and not self.stream:
+            return
+
+        self._running = False
+
+        if self.stream:
+            event = threading.Event()
+            self.stream.stopCaptureWithCompletionHandler_(lambda e: event.set())
+            event.wait(timeout=5.0)
+            self.stream = None
+
+        print(LINE)
+
+        # Save audio files
+        system_samples = self._system_buffer.get_samples()
+        mic_samples = self._mic_buffer.get_samples() if self.include_mic else None
+
+        if len(system_samples) > 0:
+            int16 = float32_to_int16(system_samples)
+            save_fn = save_wav if self.output_path.suffix == ".wav" else save_mp3
+            size = save_fn(int16, self.output_path)
+            duration = len(system_samples) / SAMPLE_RATE
+            print(f"  > saved {self.output_path.name} ({size // 1024} KB, {duration:.1f}s)")
+
+        mic_path = None
+        if mic_samples is not None and len(mic_samples) > 0:
+            mic_path = self.output_path.with_stem(f"{self.output_path.stem}_mic")
+            mic_resampled = resample(mic_samples, MIC_SAMPLE_RATE, SAMPLE_RATE)
+            int16 = float32_to_int16(mic_resampled)
+            save_fn = save_wav if self.output_path.suffix == ".wav" else save_mp3
+            size = save_fn(int16, mic_path)
+            duration = len(mic_resampled) / SAMPLE_RATE
+            print(f"  > saved {mic_path.name} ({size // 1024} KB, {duration:.1f}s)")
+
+        # Live stats
+        if self._transcriber:
+            stats = self._transcriber.get_stats()
+            print(f"  > live: {stats['updates']} updates, {stats['avg_time']:.2f}s avg")
+
+        # Final transcription
+        if self.final and self.output_path.exists():
+            self._transcribe_final(mic_path)
+
+    def _transcribe_final(self, mic_path: Path | None):
+        """Run final high-quality transcription."""
+        model_name = self.model.split("/")[-1]
+        print(f"  > transcribing with {model_name} (language: {self.language})...")
+
+        result = transcribe_audio(self.output_path, self.model, self.language)
+        text = format_transcript(result["segments"]) or result["text"]
+
+        output_path = self.output_path.with_suffix(".txt")
+        output_path.write_text(text)
+
+        print(LINE)
+        print(text)
+        print(LINE)
+        print(f"  > saved {output_path.name} ({result['duration_seconds']:.1f}s)")
+
+        # Mic transcription
+        mic_text = None
+        if mic_path and mic_path.exists():
+            print(f"  > transcribing mic with {model_name}...")
+            mic_result = transcribe_audio(mic_path, self.model, self.language, detect_speech=True)
+
+            if mic_result["segments"]:
+                mic_text = format_transcript(mic_result["segments"])
+                mic_output = mic_path.with_suffix(".txt")
+                mic_output.write_text(mic_text)
+                print(f"  > saved {mic_output.name} ({mic_result['duration_seconds']:.1f}s)")
+
+        # Summary
+        if self.summarize and text:
+            from .summarizer import summarize_file
+
+            summary = summarize_file(output_path, mic_transcript=mic_text)
+            if summary:
+                print(LINE)
+                print(summary)
+                print(LINE)
 
     def _get_shareable_content(self):
         """Get shareable content synchronously."""
@@ -163,29 +314,8 @@ class AudioRecorder:
 
         return result["content"]
 
-    def _get_content_filter(self) -> SCContentFilter:
-        """Get a content filter for capturing system audio."""
-        content = self._get_shareable_content()
-        displays = content.displays()
-        if not displays:
-            raise RuntimeError("No displays found")
-        return SCContentFilter.alloc().initWithDisplay_excludingWindows_(displays[0], [])
-
-    def _configure_stream(self) -> SCStreamConfiguration:
-        """Configure the audio stream."""
-        config = SCStreamConfiguration.alloc().init()
-        config.setCapturesAudio_(True)
-        config.setExcludesCurrentProcessAudio_(False)
-        if self.include_mic:
-            config.setCaptureMicrophone_(True)
-        config.setWidth_(2)
-        config.setHeight_(2)
-        config.setSampleRate_(SAMPLE_RATE)
-        config.setChannelCount_(CHANNELS)
-        return config
-
     def _start_stream(self):
-        """Start the capture stream."""
+        """Start capture stream."""
         result = {"error": None}
         event = threading.Event()
 
@@ -199,268 +329,3 @@ class AudioRecorder:
             raise TimeoutError("Timeout starting capture")
         if result["error"]:
             raise RuntimeError(f"Failed: {result['error'].localizedDescription()}")
-
-    def _stop_stream(self):
-        """Stop the capture stream."""
-        if not self.stream:
-            return
-        event = threading.Event()
-        self.stream.stopCaptureWithCompletionHandler_(lambda e: event.set())
-        event.wait(timeout=5.0)
-
-    def _save_audio(self) -> None:
-        """Save system audio and microphone to separate files."""
-        system_samples = self._system_buffer.get_samples()
-        mic_samples = self._mic_buffer.get_samples() if self.include_mic else np.array([])
-
-        sys_duration = len(system_samples) / SAMPLE_RATE
-
-        if len(mic_samples) > 0:
-            mic_resampled = resample(mic_samples, MIC_SAMPLE_RATE, SAMPLE_RATE)
-        else:
-            mic_resampled = np.array([])
-
-        # Save system audio
-        if len(system_samples) > 0:
-            int16 = float32_to_int16(system_samples)
-            if self.output_path.suffix.lower() == ".wav":
-                size = save_wav(int16, self.output_path)
-            else:
-                size = save_mp3(int16, self.output_path)
-            _log(f"saved {self.output_path.name} ({size // 1024} KB, {sys_duration:.1f}s)")
-        else:
-            _log("no system audio captured")
-
-        # Save mic audio to separate file
-        if len(mic_resampled) > 0:
-            mic_path = self.output_path.with_stem(self.output_path.stem + "_mic")
-            int16_mic = float32_to_int16(mic_resampled)
-            mic_dur = len(mic_resampled) / SAMPLE_RATE
-            if self.output_path.suffix.lower() == ".wav":
-                size = save_wav(int16_mic, mic_path)
-            else:
-                size = save_mp3(int16_mic, mic_path)
-            _log(f"saved {mic_path.name} ({size // 1024} KB, {mic_dur:.1f}s)")
-
-    def start(self, duration: int | None = None):
-        """Start recording audio."""
-        self._system_buffer = AudioBuffer()
-        self._mic_buffer = AudioBuffer()
-
-        # Header
-        mode = "system + mic" if self.include_mic else "system only"
-        features = [mode]
-        if self._transcriber:
-            if self.language == "en":
-                features.append("live transcription (moonshine)")
-            else:
-                features.append(f"live transcription (whisper-tiny, {self.language})")
-        if self.final_transcribe:
-            features.append(self.whisper_model.split("/")[-1])
-        print(f"\naudio-recorder | {', '.join(features)}")
-
-        # Preload live transcription model before recording
-        if self._transcriber:
-            model_display = self._transcriber.model_name
-            if self.language != "en":
-                model_display = f"whisper-tiny ({self.language})"
-            sys.stdout.write(f"  > loading {model_display}... ")
-            sys.stdout.flush()
-            load_time = self._transcriber.load_model(quiet=True)
-            print(f"ready ({load_time:.1f}s)")
-
-        config = self._configure_stream()
-        content_filter = self._get_content_filter()
-
-        self.output_handler = AudioStreamOutput.alloc().initWithSystemBuffer_micBuffer_(
-            self._system_buffer, self._mic_buffer
-        )
-        self.stream = SCStream.alloc().initWithFilter_configuration_delegate_(
-            content_filter, config, self.output_handler
-        )
-
-        # Add outputs
-        self.stream.addStreamOutput_type_sampleHandlerQueue_error_(
-            self.output_handler, SCStreamOutputTypeAudio, None, objc.nil
-        )
-        if self.include_mic:
-            self.stream.addStreamOutput_type_sampleHandlerQueue_error_(
-                self.output_handler,
-                SCStreamOutputTypeMicrophone,
-                None,
-                objc.nil,
-            )
-
-        self._is_running = True
-        self._start_stream()
-
-        _log(f"recording to {self.output_path.name} (ctrl+c to stop)")
-        print(LINE)
-
-        try:
-            self._run_loop(duration)
-        except KeyboardInterrupt:
-            pass
-        finally:
-            self.stop()
-
-    def _run_loop(self, duration: int | None):
-        """Main recording loop with live transcription."""
-        start_time = time.monotonic()
-        last_transcribe = start_time
-        interval = self._transcriber.update_interval if self._transcriber else 3.0
-
-        while self._is_running:
-            time.sleep(0.1)
-            now = time.monotonic()
-            elapsed = now - start_time
-
-            if duration and elapsed >= duration:
-                break
-
-            if self._transcriber and now - last_transcribe >= interval:
-                self._process_live_transcription()
-                last_transcribe = now
-
-        # Final live transcription update (synchronous to capture last audio)
-        if self._transcriber:
-            self._process_live_transcription(sync=True)
-
-    def _process_live_transcription(self, *, sync: bool = False):
-        """Run Moonshine on current buffer and print new words."""
-        if not self._transcriber:
-            return
-
-        buffer_len = self._system_buffer.length()
-        if buffer_len < SAMPLE_RATE:
-            return
-
-        if sync:
-            text, _ = self._transcriber.process_buffer_sync(
-                self._system_buffer.get_range_np,
-                buffer_len,
-            )
-        else:
-            text, _ = self._transcriber.process_buffer(
-                self._system_buffer.get_range_np,
-                buffer_len,
-            )
-
-        if text:
-            print(text)
-
-    def stop(self):
-        """Stop recording, save audio, run final transcription."""
-        if not self._is_running and self.stream is None:
-            return
-
-        self._is_running = False
-
-        if self.stream:
-            self._stop_stream()
-            self.stream = None
-
-        print(LINE)
-
-        if self._system_buffer:
-            self._save_audio()
-
-        # Show live transcript stats
-        if self._transcriber:
-            stats = self._transcriber.get_stats()
-            _log(
-                f"live transcript: {stats['updates']} updates, {stats['avg_process_time']:.2f}s avg"
-            )
-
-        # Auto-transcribe with Whisper for high-quality final transcript
-        if self.final_transcribe and self.output_path.exists():
-            self._run_final_transcription()
-
-        # Summarize transcript with Gemini
-        if self.summarize:
-            transcript_path = self._final_transcript_path()
-            if transcript_path.exists():
-                self._run_summary(transcript_path)
-
-    def _mic_audio_path(self) -> Path:
-        """Path for mic audio file."""
-        return self.output_path.with_stem(self.output_path.stem + "_mic")
-
-    def _mic_transcript_path(self) -> Path:
-        """Path for mic transcript file."""
-        return self._mic_audio_path().with_suffix(".txt")
-
-    def _run_final_transcription(self):
-        """Run MLX Whisper on the saved audio for high-quality transcript."""
-        import mlx_whisper
-
-        output_txt = self._final_transcript_path()
-        model_short = self.whisper_model.split("/")[-1]
-        _log(f"transcribing with {model_short} (language: {self.language})...")
-
-        start = time.time()
-        result = mlx_whisper.transcribe(
-            str(self.output_path),
-            path_or_hf_repo=self.whisper_model,
-            language=self.language,
-            task="transcribe",
-        )
-        elapsed = time.time() - start
-
-        text = format_segments(result.get("segments", []))
-        if not text:
-            text = result["text"].strip()
-        output_txt.write_text(text)
-
-        print(LINE)
-        print(text)
-        print(LINE)
-        _log(f"saved {output_txt.name} ({elapsed:.1f}s)")
-
-        # Transcribe mic audio if it exists
-        mic_path = self._mic_audio_path()
-        if mic_path.exists():
-            mic_txt = self._mic_transcript_path()
-
-            _log("detecting speech in mic audio...")
-            speech_ranges = detect_speech_segments(mic_path)
-            if not speech_ranges:
-                _log("no speech detected in mic audio, skipping")
-                return
-
-            _log(f"transcribing mic with {model_short}...")
-            start = time.time()
-            mic_result = mlx_whisper.transcribe(
-                str(mic_path),
-                path_or_hf_repo=self.whisper_model,
-                condition_on_previous_text=False,
-                language=self.language,
-                task="transcribe",
-            )
-            mic_elapsed = time.time() - start
-
-            segments = mic_result.get("segments", [])
-            segments = filter_segments_by_speech(segments, speech_ranges)
-            mic_text = format_segments(segments)
-            if mic_text:
-                mic_txt.write_text(mic_text)
-                _log(f"saved {mic_txt.name} ({mic_elapsed:.1f}s)")
-            else:
-                _log("no speech segments after filtering")
-
-    def _run_summary(self, transcript_path: Path):
-        """Summarize transcript using Gemini."""
-        from .summarizer import summarize_file
-
-        mic_transcript = None
-        mic_txt = self._mic_transcript_path()
-        if mic_txt.exists():
-            mic_transcript = mic_txt.read_text().strip() or None
-
-        summary = summarize_file(
-            transcript_path, meeting=self.meeting, mic_transcript=mic_transcript
-        )
-        if summary:
-            print(LINE)
-            print(summary)
-            print(LINE)
