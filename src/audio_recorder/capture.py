@@ -100,6 +100,7 @@ class AudioRecorder:
         whisper_model: str = "mlx-community/distil-whisper-large-v3",
         summarize: bool = True,
         meeting: dict | None = None,
+        language: str = "en",
     ):
         self.output_path = Path(output_path)
         self.include_mic = include_mic
@@ -108,6 +109,7 @@ class AudioRecorder:
         self.whisper_model = whisper_model
         self.summarize = summarize
         self.meeting = meeting
+        self.language = language
 
         self.stream: SCStream | None = None
         self.output_handler: AudioStreamOutput | None = None
@@ -115,15 +117,24 @@ class AudioRecorder:
         self._mic_buffer: AudioBuffer | None = None
         self._is_running = False
 
-        # Moonshine for live transcription
+        # Live transcription
         self._transcriber = None
         if live_transcribe:
-            from .moonshine_transcriber import MoonshineTranscriber
-
             live_path = self._live_transcript_path()
-            self._transcriber = MoonshineTranscriber(
-                output_path=live_path,
-            )
+
+            # Use Moonshine for English, Whisper for other languages
+            if language == "en":
+                from .moonshine_transcriber import MoonshineTranscriber
+                self._transcriber = MoonshineTranscriber(
+                    output_path=live_path,
+                )
+            else:
+                from .whisper_live_transcriber import WhisperLiveTranscriber
+                self._transcriber = WhisperLiveTranscriber(
+                    model_name="mlx-community/whisper-tiny-mlx",
+                    language=language,
+                    output_path=live_path,
+                )
 
     def _live_transcript_path(self) -> Path:
         """Path for live transcript file."""
@@ -240,14 +251,20 @@ class AudioRecorder:
         mode = "system + mic" if self.include_mic else "system only"
         features = [mode]
         if self._transcriber:
-            features.append("live transcription")
+            if self.language == "en":
+                features.append("live transcription (moonshine)")
+            else:
+                features.append(f"live transcription (whisper-tiny, {self.language})")
         if self.final_transcribe:
             features.append(self.whisper_model.split("/")[-1])
         print(f"\naudio-recorder | {', '.join(features)}")
 
-        # Preload Moonshine before recording
+        # Preload live transcription model before recording
         if self._transcriber:
-            sys.stdout.write(f"  > loading {self._transcriber.model_name}... ")
+            model_display = self._transcriber.model_name
+            if self.language != "en":
+                model_display = f"whisper-tiny ({self.language})"
+            sys.stdout.write(f"  > loading {model_display}... ")
             sys.stdout.flush()
             load_time = self._transcriber.load_model(quiet=True)
             print(f"ready ({load_time:.1f}s)")
@@ -379,12 +396,14 @@ class AudioRecorder:
 
         output_txt = self._final_transcript_path()
         model_short = self.whisper_model.split("/")[-1]
-        _log(f"transcribing with {model_short}...")
+        _log(f"transcribing with {model_short} (language: {self.language})...")
 
         start = time.time()
         result = mlx_whisper.transcribe(
             str(self.output_path),
             path_or_hf_repo=self.whisper_model,
+            language=self.language,
+            task="transcribe",
         )
         elapsed = time.time() - start
 
@@ -415,6 +434,8 @@ class AudioRecorder:
                 str(mic_path),
                 path_or_hf_repo=self.whisper_model,
                 condition_on_previous_text=False,
+                language=self.language,
+                task="transcribe",
             )
             mic_elapsed = time.time() - start
 
