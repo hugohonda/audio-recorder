@@ -17,7 +17,10 @@ MP3_BITRATE = 64  # kbps, plenty for speech
 
 def float32_to_int16(samples: np.ndarray) -> np.ndarray:
     """Convert float32 samples [-1.0, 1.0] to int16 values."""
-    return (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
+    # Handle NaN/inf values
+    samples = np.nan_to_num(samples, nan=0.0, posinf=1.0, neginf=-1.0)
+    with np.errstate(invalid='ignore'):
+        return (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
 
 
 def bytes_to_float32(data: bytes) -> np.ndarray:
@@ -32,11 +35,21 @@ def resample(samples: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
 
     ratio = to_rate / from_rate
     new_len = int(len(samples) * ratio)
+    if new_len == 0:
+        return np.array([], dtype=samples.dtype)
+
     indices = np.arange(new_len) / ratio
     lo = indices.astype(np.intp)
     hi = np.minimum(lo + 1, len(samples) - 1)
-    frac = indices - lo
-    return samples[lo] * (1 - frac) + samples[hi] * frac
+    frac = (indices - lo).astype(samples.dtype)
+
+    # Handle edge cases to prevent NaN
+    with np.errstate(invalid='ignore'):
+        result = samples[lo] * (1 - frac) + samples[hi] * frac
+
+    # Replace any NaN values with 0
+    result = np.nan_to_num(result, nan=0.0)
+    return result
 
 
 def save_wav(samples: np.ndarray, path: Path) -> int:
@@ -133,6 +146,13 @@ class AudioBuffer:
     def get_samples(self) -> np.ndarray:
         """Get all collected samples as numpy float32 array."""
         with self._lock:
+            # Ensure buffer size is a multiple of 4 (float32 size)
+            valid_length = (len(self._data) // 4) * 4
+            if valid_length == 0:
+                return np.array([], dtype=np.float32)
+            if valid_length != len(self._data):
+                # Truncate to valid length to prevent corruption
+                self._data = self._data[:valid_length]
             return np.frombuffer(bytes(self._data), dtype=np.float32)
 
     def length(self) -> int:

@@ -3,8 +3,10 @@
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
+import numpy as np
 import objc
 from CoreMedia import (
     CMBlockBufferCopyDataBytes,
@@ -34,6 +36,18 @@ from .audio import (
 from .transcribe import format_transcript, transcribe_audio
 
 LINE = "─" * 50
+SILENCE_TIMEOUT = 600  # Stop recording after 10 minutes of silence
+
+
+def safe_execute(func, error_msg: str, critical: bool = False):
+    """Execute function with error handling. Returns (success, result)."""
+    try:
+        return True, func()
+    except Exception as e:
+        print(f"  > {error_msg}: {e}")
+        if critical:
+            traceback.print_exc()
+        return False, None
 
 
 class AudioStreamOutput(NSObject):
@@ -103,6 +117,8 @@ class AudioRecorder:
         self._mic_buffer = None
         self._running = False
         self._transcriber = None
+        self._vad_model = None
+        self._last_speech_time = None
 
         # Setup live transcription
         if live:
@@ -185,7 +201,9 @@ class AudioRecorder:
         """Main recording loop."""
         start = time.monotonic()
         last_update = start
+        last_silence_check = start
         interval = self._transcriber.update_interval if self._transcriber else 3.0
+        silence_check_interval = 10.0  # Check for silence every 10 seconds
 
         while self._running:
             time.sleep(0.1)
@@ -194,23 +212,134 @@ class AudioRecorder:
             if duration and (now - start) >= duration:
                 break
 
+            # Check for silence timeout
+            if (now - last_silence_check) >= silence_check_interval:
+                def check_silence():
+                    if self._check_silence_timeout(now):
+                        mins = SILENCE_TIMEOUT // 60
+                        print(f"\n  > stopping: {mins} minute{'s' if mins != 1 else ''} of silence detected")
+                        return True
+                    return False
+
+                success, should_stop = safe_execute(check_silence, "warning: silence check error")
+                if should_stop:
+                    break
+                last_silence_check = now
+
+            # Live transcription
             if self._transcriber and (now - last_update) >= interval:
-                text, _ = self._transcriber.process_buffer(
-                    self._system_buffer.get_range_np,
-                    self._system_buffer.length(),
-                )
-                if text:
-                    print(text)
+                def update_transcription():
+                    text, _ = self._transcriber.process_buffer(
+                        self._system_buffer.get_range_np, self._system_buffer.length()
+                    )
+                    if text:
+                        print(text)
+
+                safe_execute(update_transcription, "warning: live transcription error")
                 last_update = now
 
         # Final live update
         if self._transcriber:
-            text, _ = self._transcriber.process_buffer_sync(
-                self._system_buffer.get_range_np,
-                self._system_buffer.length(),
+            def final_update():
+                text, _ = self._transcriber.process_buffer_sync(
+                    self._system_buffer.get_range_np, self._system_buffer.length()
+                )
+                if text:
+                    print(text)
+
+            safe_execute(final_update, "warning: final live update error")
+
+    def _detect_speech_in_buffer(self, buffer, buffer_length: int, sample_rate: int, label: str) -> bool:
+        """Detect speech in audio buffer using VAD. Returns True if speech detected."""
+        if buffer_length < sample_rate:
+            return False
+
+        check_samples = min(5 * sample_rate, buffer_length)
+        start_idx = buffer_length - check_samples
+        recent_audio = buffer.get_range_np(start_idx, buffer_length)
+
+        if len(recent_audio) == 0:
+            return False
+
+        try:
+            from silero_vad import get_speech_timestamps
+
+            # Resample to 16kHz if needed (for mic audio at 24kHz)
+            if sample_rate != SAMPLE_RATE:
+                recent_audio = resample(recent_audio, sample_rate, SAMPLE_RATE)
+
+            # Prepare tensor
+            audio_tensor = recent_audio.astype(np.float32)
+            if len(audio_tensor.shape) == 1:
+                audio_tensor = audio_tensor.reshape(1, -1)
+
+            timestamps = get_speech_timestamps(
+                audio_tensor,
+                self._vad_model,
+                sampling_rate=SAMPLE_RATE,
+                threshold=0.5,
+                min_speech_duration_ms=300,
+                return_seconds=False,
             )
-            if text:
-                print(text)
+            return len(timestamps) > 0
+        except Exception as e:
+            print(f"  > VAD error ({label}): {e}")
+            return False
+
+    def _check_silence_timeout(self, current_time: float) -> bool:
+        """Check if silence timeout exceeded. Returns True if should stop recording."""
+        try:
+            # Load VAD model if needed
+            if self._vad_model is None:
+                from silero_vad import load_silero_vad
+                self._vad_model = load_silero_vad()
+
+            # Check both streams for speech
+            system_speech = self._detect_speech_in_buffer(
+                self._system_buffer, self._system_buffer.length(), SAMPLE_RATE, "system"
+            )
+            mic_speech = (
+                self._detect_speech_in_buffer(
+                    self._mic_buffer, self._mic_buffer.length(), MIC_SAMPLE_RATE, "mic"
+                )
+                if self.include_mic
+                else False
+            )
+
+            # Update silence timer
+            if system_speech or mic_speech:
+                self._last_speech_time = current_time
+                return False
+
+            if self._last_speech_time is None:
+                self._last_speech_time = current_time
+                return False
+
+            return (current_time - self._last_speech_time) >= SILENCE_TIMEOUT
+
+        except Exception as e:
+            print(f"  > critical VAD error: {e}")
+            return False
+
+    def _save_audio_file(self, samples: np.ndarray, path: Path) -> bool:
+        """Save audio samples to file. Returns True if successful."""
+        try:
+            int16 = float32_to_int16(samples)
+            save_fn = save_wav if path.suffix == ".wav" else save_mp3
+            size = save_fn(int16, path)
+            duration = len(samples) / SAMPLE_RATE
+            print(f"  > saved {path.name} ({size // 1024} KB, {duration:.1f}s)")
+            return True
+        except Exception as e:
+            print(f"  > error saving {path.name}: {e}")
+            traceback.print_exc()
+            return False
+
+    def _stop_stream(self):
+        """Stop the capture stream."""
+        event = threading.Event()
+        self.stream.stopCaptureWithCompletionHandler_(lambda e: event.set())
+        event.wait(timeout=5.0)
 
     def stop(self):
         """Stop recording and process audio."""
@@ -219,81 +348,96 @@ class AudioRecorder:
 
         self._running = False
 
+        # Stop stream
         if self.stream:
-            event = threading.Event()
-            self.stream.stopCaptureWithCompletionHandler_(lambda e: event.set())
-            event.wait(timeout=5.0)
+            safe_execute(self._stop_stream, "warning: error stopping stream")
             self.stream = None
 
         print(LINE)
 
-        # Save audio files
-        system_samples = self._system_buffer.get_samples()
-        mic_samples = self._mic_buffer.get_samples() if self.include_mic else None
+        # Get audio buffers (critical - must succeed)
+        _, system_samples = safe_execute(
+            lambda: self._system_buffer.get_samples(), "error reading system buffer", critical=True
+        )
+        _, mic_samples = safe_execute(
+            lambda: self._mic_buffer.get_samples() if self.include_mic else None,
+            "error reading mic buffer",
+            critical=True,
+        )
 
-        if len(system_samples) > 0:
-            int16 = float32_to_int16(system_samples)
-            save_fn = save_wav if self.output_path.suffix == ".wav" else save_mp3
-            size = save_fn(int16, self.output_path)
-            duration = len(system_samples) / SAMPLE_RATE
-            print(f"  > saved {self.output_path.name} ({size // 1024} KB, {duration:.1f}s)")
+        # Save system audio
+        if system_samples is not None and len(system_samples) > 0:
+            self._save_audio_file(system_samples, self.output_path)
+        else:
+            print("  > warning: no system audio captured")
 
+        # Save mic audio
         mic_path = None
         if mic_samples is not None and len(mic_samples) > 0:
             mic_path = self.output_path.with_stem(f"{self.output_path.stem}_mic")
             mic_resampled = resample(mic_samples, MIC_SAMPLE_RATE, SAMPLE_RATE)
-            int16 = float32_to_int16(mic_resampled)
-            save_fn = save_wav if self.output_path.suffix == ".wav" else save_mp3
-            size = save_fn(int16, mic_path)
-            duration = len(mic_resampled) / SAMPLE_RATE
-            print(f"  > saved {mic_path.name} ({size // 1024} KB, {duration:.1f}s)")
+            if not self._save_audio_file(mic_resampled, mic_path):
+                mic_path = None
+        elif self.include_mic:
+            print("  > warning: no mic audio captured")
 
         # Live stats
         if self._transcriber:
-            stats = self._transcriber.get_stats()
-            print(f"  > live: {stats['updates']} updates, {stats['avg_time']:.2f}s avg")
+            def print_stats():
+                stats = self._transcriber.get_stats()
+                print(f"  > live: {stats['updates']} updates, {stats['avg_time']:.2f}s avg")
+            safe_execute(print_stats, "warning: error getting live stats")
 
         # Final transcription
         if self.final and self.output_path.exists():
-            self._transcribe_final(mic_path)
+            safe_execute(lambda: self._transcribe_final(mic_path), "error during final transcription", critical=True)
 
     def _transcribe_final(self, mic_path: Path | None):
         """Run final high-quality transcription."""
         model_name = self.model.split("/")[-1]
         print(f"  > transcribing with {model_name} (language: {self.language})...")
 
-        result = transcribe_audio(self.output_path, self.model, self.language)
-        text = format_transcript(result["segments"]) or result["text"]
+        # Transcribe system audio
+        def transcribe_system():
+            result = transcribe_audio(self.output_path, self.model, self.language)
+            text = format_transcript(result["segments"]) or result["text"]
+            output_path = self.output_path.with_suffix(".txt")
+            output_path.write_text(text)
+            print(LINE)
+            print(text)
+            print(LINE)
+            print(f"  > saved {output_path.name} ({result['duration_seconds']:.1f}s)")
+            return text
 
-        output_path = self.output_path.with_suffix(".txt")
-        output_path.write_text(text)
+        success, text = safe_execute(transcribe_system, "error transcribing system audio", critical=True)
 
-        print(LINE)
-        print(text)
-        print(LINE)
-        print(f"  > saved {output_path.name} ({result['duration_seconds']:.1f}s)")
-
-        # Mic transcription
+        # Transcribe mic audio
         mic_text = None
         if mic_path and mic_path.exists():
-            print(f"  > transcribing mic with {model_name}...")
-            mic_result = transcribe_audio(mic_path, self.model, self.language, detect_speech=True)
+            def transcribe_mic():
+                print(f"  > transcribing mic with {model_name}...")
+                mic_result = transcribe_audio(mic_path, self.model, self.language, detect_speech=True)
+                if mic_result["segments"]:
+                    mic_text = format_transcript(mic_result["segments"])
+                    mic_output = mic_path.with_suffix(".txt")
+                    mic_output.write_text(mic_text)
+                    print(f"  > saved {mic_output.name} ({mic_result['duration_seconds']:.1f}s)")
+                    return mic_text
+                return None
 
-            if mic_result["segments"]:
-                mic_text = format_transcript(mic_result["segments"])
-                mic_output = mic_path.with_suffix(".txt")
-                mic_output.write_text(mic_text)
-                print(f"  > saved {mic_output.name} ({mic_result['duration_seconds']:.1f}s)")
+            _, mic_text = safe_execute(transcribe_mic, "error transcribing mic audio", critical=True)
 
-        # Summary
+        # Generate summary
         if self.summarize and text:
-            from .summarizer import summarize_file
+            def generate_summary():
+                from .summarizer import summarize_file
+                summary = summarize_file(self.output_path.with_suffix(".txt"), mic_transcript=mic_text)
+                if summary:
+                    print(LINE)
+                    print(summary)
+                    print(LINE)
 
-            summary = summarize_file(output_path, mic_transcript=mic_text)
-            if summary:
-                print(LINE)
-                print(summary)
-                print(LINE)
+            safe_execute(generate_summary, "error generating summary", critical=True)
 
     def _get_shareable_content(self):
         """Get shareable content synchronously."""
