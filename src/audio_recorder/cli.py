@@ -31,27 +31,33 @@ def cli():
 @click.option("-o", "--output", help="Output file path")
 @click.option("-d", "--duration", type=int, help="Duration in seconds")
 @click.option("--no-mic", is_flag=True, help="System audio only")
+@click.option("--mic-only", is_flag=True, help="Mic audio only (no system audio)")
 @click.option("--live", is_flag=True, help="Live transcription")
 @click.option("--no-final", is_flag=True, help="Skip final transcription")
 @click.option("-m", "--model", type=click.Choice(list(MODELS.keys())), default="distil")
 @click.option("--no-summary", is_flag=True, help="Skip summary")
 @click.option("-l", "--lang", type=click.Choice(["en", "pt-br"]), default="en")
-def record(output, duration, no_mic, live, no_final, model, no_summary, lang):
+def record(output, duration, no_mic, mic_only, live, no_final, model, no_summary, lang):
     """Record system audio."""
     from .capture import AudioRecorder
 
+    if no_mic and mic_only:
+        raise click.UsageError("Cannot use --no-mic and --mic-only together")
+
     output = output or str(RECORDINGS_DIR / datetime.now().strftime("%Y-%m-%d_%H-%M-%S.mp3"))
-    language = "pt" if lang == "pt-br" else lang
-    model_path = get_best_model_for_language(language, MODELS[model])
+    whisper_lang = "pt" if lang == "pt-br" else lang
+    model_path = get_best_model_for_language(whisper_lang, MODELS[model])
 
     recorder = AudioRecorder(
         output_path=output,
         include_mic=not no_mic,
+        mic_only=mic_only,
         live=live,
         final=not no_final,
         model=model_path,
         summarize=not no_summary,
-        language=language,
+        language=lang,  # Pass original lang (pt-br) for summaries
+        whisper_language=whisper_lang,  # Pass whisper lang (pt) for transcription
     )
     recorder.start(duration)
 
@@ -64,15 +70,15 @@ def record(output, duration, no_mic, live, no_final, model, no_summary, lang):
 def transcribe(audio_file, model, no_summary, lang):
     """Transcribe an audio file."""
     audio_path = Path(audio_file)
-    language = "pt" if lang == "pt-br" else lang
-    model_path = get_best_model_for_language(language, MODELS[model])
+    whisper_lang = "pt" if lang == "pt-br" else lang
+    model_path = get_best_model_for_language(whisper_lang, MODELS[model])
 
     click.echo(f"\nTranscribing: {audio_path.name}")
     click.echo(f"  Model: {model_path.split('/')[-1]}")
     click.echo(f"  Language: {lang}")
 
     # Main audio
-    result = transcribe_audio(audio_path, model_path, language)
+    result = transcribe_audio(audio_path, model_path, whisper_lang)
     text = format_transcript(result["segments"]) or result["text"]
 
     output_path = audio_path.with_suffix(".txt")
@@ -86,7 +92,7 @@ def transcribe(audio_file, model, no_summary, lang):
     mic_text = None
     if mic_path.exists():
         click.echo(f"\nTranscribing mic: {mic_path.name}")
-        mic_result = transcribe_audio(mic_path, model_path, language, detect_speech=True)
+        mic_result = transcribe_audio(mic_path, model_path, whisper_lang, detect_speech=True)
         if mic_result["segments"]:
             mic_text = format_transcript(mic_result["segments"])
             mic_output = mic_path.with_suffix(".txt")
@@ -97,25 +103,27 @@ def transcribe(audio_file, model, no_summary, lang):
     if not no_summary and text:
         from .summarizer import summarize_file
 
-        summary = summarize_file(output_path, mic_transcript=mic_text)
+        summary = summarize_file(output_path, mic_transcript=mic_text, language=lang)
         if summary:
             click.echo(f"\n{summary}\n")
 
 
 @cli.command()
 @click.argument("transcript_file", type=click.Path(exists=True))
-def summarize(transcript_file):
+@click.option("-l", "--lang", type=click.Choice(["en", "pt-br"]), default="en", help="Output language")
+def summarize(transcript_file, lang):
     """Summarize a transcript."""
     from .summarizer import summarize_file
 
     transcript_path = Path(transcript_file)
     click.echo(f"\nSummarizing: {transcript_path.name}")
+    click.echo(f"  Language: {lang}")
 
     # Check for mic transcript
     mic_path = transcript_path.with_stem(f"{transcript_path.stem}_mic").with_suffix(".txt")
     mic_text = mic_path.read_text() if mic_path.exists() else None
 
-    summary = summarize_file(transcript_path, mic_transcript=mic_text)
+    summary = summarize_file(transcript_path, mic_transcript=mic_text, language=lang)
     if summary:
         click.echo(f"\n{summary}\n")
     else:

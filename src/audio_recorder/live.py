@@ -41,9 +41,10 @@ class LiveTranscriber:
             self._model = MoonshineOnnxModel(model_name="moonshine/base")
             self._tokenizer = load_tokenizer()
         else:
-            # Use Whisper-tiny for other languages (24x realtime)
-            import mlx_whisper  # Model loads on first use
-            self._model = "mlx-community/whisper-tiny-mlx"
+            # Use Whisper-small for other languages (30x realtime, much better than tiny)
+            from .transcribe import resolve_model_path
+
+            self._model = resolve_model_path("mlx-community/whisper-small-mlx")
 
         return time.time() - start
 
@@ -90,9 +91,13 @@ class LiveTranscriber:
             if len(samples) >= SAMPLE_RATE:
                 self._infer(samples, buffer_length, has_overlap)
                 final = self._collect_result()
-                if result and final:
+                if result and result[0] and final and final[0]:
                     return (f"{result[0]} {final[0]}", result[1] + final[1])
-                return final or result or (None, 0)
+                if final and final[0]:
+                    return final
+                if result and result[0]:
+                    return result
+                return (None, 0)
 
         return result or (None, 0)
 
@@ -150,9 +155,18 @@ class LiveTranscriber:
             path_or_hf_repo=self._model,
             language=self.language,
             task="transcribe",
-            verbose=False,
+            verbose=None,
+            condition_on_previous_text=False,
+            no_speech_threshold=0.4,
         )
-        return result["text"].strip()
+        # Skip segments where whisper detected no speech
+        segments = result.get("segments", [])
+        spoken = [
+            s["text"].strip()
+            for s in segments
+            if s.get("no_speech_prob", 0) < 0.4
+        ]
+        return " ".join(spoken).strip()
 
     def _strip_overlap(self, text: str) -> str:
         """Remove overlapping words from previous chunk."""

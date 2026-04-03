@@ -90,37 +90,69 @@ def find_active_meeting(meetings: list[dict], at: datetime | None = None) -> dic
     return None
 
 
-def format_meeting_context(meeting: dict) -> str:
+def format_meeting_context(meeting: dict, language: str = "en") -> str:
     """Format a meeting dict into a markdown section for prompt injection."""
-    lines = [
-        "## Meeting Context",
-        "",
-        f"This recording is from the meeting: **{meeting['name']}**",
-    ]
-
-    if meeting.get("description"):
-        lines.append(f"- **Description:** {meeting['description']}")
-
-    start = meeting["_start_time"]
-    end = meeting["_end_time"]
-    lines.append(f"- **Scheduled:** {start.strftime('%H:%M')} – {end.strftime('%H:%M')}")
-
-    if meeting.get("participants"):
-        lines.append(f"- **Participants:** {', '.join(meeting['participants'])}")
-
-    if meeting.get("agenda"):
-        lines.append("- **Expected Agenda:**")
-        for item in meeting["agenda"]:
-            lines.append(f"  - {item}")
-
-    lines.extend(
-        [
+    if language == "pt-br":
+        lines = [
+            "## Contexto da Reunião",
             "",
-            "Use this context to improve your summary:",
-            "- Attribute statements to the listed participants when possible based on voice/context clues",
-            "- Track which agenda items were covered and which were skipped",
-            "- Note any significant off-agenda topics that came up",
+            f"Esta gravação é da reunião: **{meeting['name']}**",
         ]
-    )
+
+        if meeting.get("description"):
+            lines.append(f"- **Descrição:** {meeting['description']}")
+
+        start = meeting["_start_time"]
+        end = meeting["_end_time"]
+        lines.append(f"- **Agendado:** {start.strftime('%H:%M')} – {end.strftime('%H:%M')}")
+
+        if meeting.get("participants"):
+            lines.append(f"- **Participantes:** {', '.join(meeting['participants'])}")
+
+        if meeting.get("agenda"):
+            lines.append("- **Pauta Esperada:**")
+            for item in meeting["agenda"]:
+                lines.append(f"  - {item}")
+
+        lines.extend(
+            [
+                "",
+                "Use este contexto para melhorar seu resumo:",
+                "- Atribua declarações aos participantes listados quando possível baseando-se em pistas de voz/contexto",
+                "- Acompanhe quais itens da pauta foram cobertos e quais foram pulados",
+                "- Observe quaisquer tópicos significativos fora da pauta que surgiram",
+            ]
+        )
+    else:
+        lines = [
+            "## Meeting Context",
+            "",
+            f"This recording is from the meeting: **{meeting['name']}**",
+        ]
+
+        if meeting.get("description"):
+            lines.append(f"- **Description:** {meeting['description']}")
+
+        start = meeting["_start_time"]
+        end = meeting["_end_time"]
+        lines.append(f"- **Scheduled:** {start.strftime('%H:%M')} – {end.strftime('%H:%M')}")
+
+        if meeting.get("participants"):
+            lines.append(f"- **Participants:** {', '.join(meeting['participants'])}")
+
+        if meeting.get("agenda"):
+            lines.append("- **Expected Agenda:**")
+            for item in meeting["agenda"]:
+                lines.append(f"  - {item}")
+
+        lines.extend(
+            [
+                "",
+                "Use this context to improve your summary:",
+                "- Attribute statements to the listed participants when possible based on voice/context clues",
+                "- Track which agenda items were covered and which were skipped",
+                "- Note any significant off-agenda topics that came up",
+            ]
+        )
 
     return "\n".join(lines)

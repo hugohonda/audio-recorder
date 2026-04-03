@@ -7,6 +7,19 @@ from typing import Any
 from .audio import SAMPLE_RATE, detect_speech_segments, filter_segments_by_speech
 
 
+def resolve_model_path(model: str) -> str:
+    """Resolve HF repo to local cached path to avoid repeated snapshot_download calls."""
+    if Path(model).exists():
+        return model
+    from huggingface_hub import snapshot_download
+
+    # Try local cache first (no network), fall back to download
+    try:
+        return snapshot_download(repo_id=model, local_files_only=True)
+    except Exception:
+        return snapshot_download(repo_id=model)
+
+
 def transcribe_audio(
     audio_path: Path,
     model: str = "mlx-community/distil-whisper-large-v3",
@@ -26,6 +39,8 @@ def transcribe_audio(
     """
     import mlx_whisper
 
+    model = resolve_model_path(model)
+
     # Speech detection for mic audio
     speech_ranges = None
     if detect_speech:
@@ -39,7 +54,7 @@ def transcribe_audio(
         path_or_hf_repo=model,
         language=language,
         task="transcribe",
-        verbose=False,
+        verbose=None,
     )
     duration = time.time() - start
 

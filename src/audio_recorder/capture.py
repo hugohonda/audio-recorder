@@ -9,9 +9,11 @@ from pathlib import Path
 import numpy as np
 import objc
 from CoreMedia import (
+    CMAudioFormatDescriptionGetStreamBasicDescription,
     CMBlockBufferCopyDataBytes,
     CMBlockBufferGetDataLength,
     CMSampleBufferGetDataBuffer,
+    CMSampleBufferGetFormatDescription,
 )
 from Foundation import NSObject
 from ScreenCaptureKit import (
@@ -59,6 +61,7 @@ class AudioStreamOutput(NSObject):
             return None
         self._system_buffer = system_buffer
         self._mic_buffer = mic_buffer
+        self._mic_sample_rate = None
         return self
 
     def stream_didOutputSampleBuffer_ofType_(self, stream, sample_buffer, output_type):
@@ -81,6 +84,15 @@ class AudioStreamOutput(NSObject):
             if output_type == SCStreamOutputTypeAudio:
                 self._system_buffer.add(bytes(audio_data))
             else:
+                # Detect actual mic sample rate from first buffer
+                if self._mic_sample_rate is None:
+                    try:
+                        fmt = CMSampleBufferGetFormatDescription(sample_buffer)
+                        asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)
+                        # PyObjC returns ASBD as tuple: (sampleRate, formatID, flags, ...)
+                        self._mic_sample_rate = int(asbd[0])
+                    except Exception:
+                        pass
                 self._mic_buffer.add(bytes(audio_data))
 
         except Exception as e:
@@ -98,21 +110,27 @@ class AudioRecorder:
         self,
         output_path: str,
         include_mic: bool = True,
+        mic_only: bool = False,
         live: bool = False,
         final: bool = True,
         model: str = "mlx-community/distil-whisper-large-v3",
         summarize: bool = True,
         language: str = "en",
+        whisper_language: str | None = None,
     ):
         self.output_path = Path(output_path)
-        self.include_mic = include_mic
+        self.include_mic = include_mic or mic_only  # mic_only implies mic
+        self.mic_only = mic_only
         self.live = live
         self.final = final
         self.model = model
         self.summarize = summarize
-        self.language = language
+        self.language = language  # For summaries (en, pt-br)
+        self.whisper_language = whisper_language or ("pt" if language == "pt-br" else language)  # For transcription
+        self.meeting = None  # Auto-detected meeting context
 
         self.stream = None
+        self._handler = None
         self._system_buffer = None
         self._mic_buffer = None
         self._running = False
@@ -125,7 +143,7 @@ class AudioRecorder:
             from .live import LiveTranscriber
 
             live_path = self.output_path.with_stem(f"{self.output_path.stem}_live").with_suffix(".txt")
-            self._transcriber = LiveTranscriber(language=language, output_path=live_path)
+            self._transcriber = LiveTranscriber(language=self.whisper_language, output_path=live_path)
 
     def start(self, duration: int | None = None):
         """Start recording."""
@@ -133,19 +151,37 @@ class AudioRecorder:
         self._mic_buffer = AudioBuffer()
 
         # Header
-        mode = "system + mic" if self.include_mic else "system only"
+        if self.mic_only:
+            mode = "mic only"
+        elif self.include_mic:
+            mode = "system + mic"
+        else:
+            mode = "system only"
         parts = [mode]
         if self._transcriber:
-            engine = "moonshine" if self.language == "en" else f"whisper-tiny ({self.language})"
+            engine = "moonshine" if self.whisper_language == "en" else f"whisper-small ({self.whisper_language})"
             parts.append(f"live ({engine})")
         if self.final:
             parts.append(self.model.split("/")[-1])
+
+        # Auto-detect active meeting
+        meetings_file = self.output_path.parent.parent / "meetings.json"
+        if meetings_file.exists():
+            try:
+                from .meeting import find_active_meeting, load_meetings
+
+                meetings = load_meetings(meetings_file)
+                self.meeting = find_active_meeting(meetings)
+                if self.meeting:
+                    parts.append(f"meeting: {self.meeting['name']}")
+            except Exception as e:
+                print(f"  > warning: meeting detection failed: {e}")
 
         print(f"\naudio-recorder | {', '.join(parts)}")
 
         # Preload live model
         if self._transcriber:
-            model_name = "moonshine" if self.language == "en" else f"whisper-tiny ({self.language})"
+            model_name = "moonshine" if self.whisper_language == "en" else f"whisper-small ({self.whisper_language})"
             sys.stdout.write(f"  > loading {model_name}... ")
             sys.stdout.flush()
             load_time = self._transcriber.load_model()
@@ -169,19 +205,19 @@ class AudioRecorder:
         config.setSampleRate_(SAMPLE_RATE)
         config.setChannelCount_(CHANNELS)
 
-        handler = AudioStreamOutput.alloc().initWithSystemBuffer_micBuffer_(
+        self._handler = AudioStreamOutput.alloc().initWithSystemBuffer_micBuffer_(
             self._system_buffer, self._mic_buffer
         )
         self.stream = SCStream.alloc().initWithFilter_configuration_delegate_(
-            content_filter, config, handler
+            content_filter, config, self._handler
         )
 
         self.stream.addStreamOutput_type_sampleHandlerQueue_error_(
-            handler, SCStreamOutputTypeAudio, None, objc.nil
+            self._handler, SCStreamOutputTypeAudio, None, objc.nil
         )
         if self.include_mic:
             self.stream.addStreamOutput_type_sampleHandlerQueue_error_(
-                handler, SCStreamOutputTypeMicrophone, None, objc.nil
+                self._handler, SCStreamOutputTypeMicrophone, None, objc.nil
             )
 
         self._start_stream()
@@ -228,9 +264,11 @@ class AudioRecorder:
 
             # Live transcription
             if self._transcriber and (now - last_update) >= interval:
+                buf, buf_len = self._get_live_buffer()
+
                 def update_transcription():
                     text, _ = self._transcriber.process_buffer(
-                        self._system_buffer.get_range_np, self._system_buffer.length()
+                        buf.get_range_np, buf_len
                     )
                     if text:
                         print(text)
@@ -240,14 +278,45 @@ class AudioRecorder:
 
         # Final live update
         if self._transcriber:
+            buf, buf_len = self._get_live_buffer()
+
             def final_update():
                 text, _ = self._transcriber.process_buffer_sync(
-                    self._system_buffer.get_range_np, self._system_buffer.length()
+                    buf.get_range_np, buf_len
                 )
                 if text:
                     print(text)
 
             safe_execute(final_update, "warning: final live update error")
+
+    def _get_live_buffer(self):
+        """Get the appropriate buffer for live transcription.
+
+        For mic-only mode, resamples mic audio to 16kHz into a temporary buffer.
+        Returns (buffer, length) where buffer has a get_range_np method.
+        """
+        if not self.mic_only:
+            return self._system_buffer, self._system_buffer.length()
+
+        # Mic-only: resample mic audio to 16kHz for transcription
+        mic_rate = (
+            self._handler._mic_sample_rate
+            if self._handler and self._handler._mic_sample_rate
+            else MIC_SAMPLE_RATE
+        )
+        mic_samples = self._mic_buffer.get_samples()
+        if len(mic_samples) == 0:
+            return self._mic_buffer, 0
+        resampled = resample(mic_samples, mic_rate, SAMPLE_RATE)
+
+        class _ResampledView:
+            """Provides get_range_np over resampled audio."""
+            def __init__(self, data):
+                self._data = data
+            def get_range_np(self, start, end):
+                return self._data[start:end]
+
+        return _ResampledView(resampled), len(resampled)
 
     def _detect_speech_in_buffer(self, buffer, buffer_length: int, sample_rate: int, label: str) -> bool:
         """Detect speech in audio buffer using VAD. Returns True if speech detected."""
@@ -298,9 +367,14 @@ class AudioRecorder:
             system_speech = self._detect_speech_in_buffer(
                 self._system_buffer, self._system_buffer.length(), SAMPLE_RATE, "system"
             )
+            mic_rate = (
+                self._handler._mic_sample_rate
+                if self._handler and self._handler._mic_sample_rate
+                else MIC_SAMPLE_RATE
+            )
             mic_speech = (
                 self._detect_speech_in_buffer(
-                    self._mic_buffer, self._mic_buffer.length(), MIC_SAMPLE_RATE, "mic"
+                    self._mic_buffer, self._mic_buffer.length(), mic_rate, "mic"
                 )
                 if self.include_mic
                 else False
@@ -355,6 +429,13 @@ class AudioRecorder:
 
         print(LINE)
 
+        # Detect actual mic sample rate (fallback to constant)
+        mic_rate = MIC_SAMPLE_RATE
+        if self._handler and self._handler._mic_sample_rate:
+            mic_rate = self._handler._mic_sample_rate
+            if mic_rate != MIC_SAMPLE_RATE:
+                print(f"  > mic sample rate: {mic_rate} Hz (detected)")
+
         # Get audio buffers (critical - must succeed)
         _, system_samples = safe_execute(
             lambda: self._system_buffer.get_samples(), "error reading system buffer", critical=True
@@ -365,20 +446,28 @@ class AudioRecorder:
             critical=True,
         )
 
-        # Save system audio
-        if system_samples is not None and len(system_samples) > 0:
-            self._save_audio_file(system_samples, self.output_path)
+        if self.mic_only:
+            # Mic-only mode: save mic audio as primary output
+            if mic_samples is not None and len(mic_samples) > 0:
+                mic_resampled = resample(mic_samples, mic_rate, SAMPLE_RATE)
+                self._save_audio_file(mic_resampled, self.output_path)
+            else:
+                print("  > warning: no mic audio captured")
         else:
-            print("  > warning: no system audio captured")
+            # Normal mode: save system audio + optional mic
+            if system_samples is not None and len(system_samples) > 0:
+                self._save_audio_file(system_samples, self.output_path)
+            else:
+                print("  > warning: no system audio captured")
 
-        # Save mic audio
+        # Save mic audio as separate file (not in mic-only mode, already saved as primary)
         mic_path = None
-        if mic_samples is not None and len(mic_samples) > 0:
+        if not self.mic_only and mic_samples is not None and len(mic_samples) > 0:
             mic_path = self.output_path.with_stem(f"{self.output_path.stem}_mic")
-            mic_resampled = resample(mic_samples, MIC_SAMPLE_RATE, SAMPLE_RATE)
+            mic_resampled = resample(mic_samples, mic_rate, SAMPLE_RATE)
             if not self._save_audio_file(mic_resampled, mic_path):
                 mic_path = None
-        elif self.include_mic:
+        elif not self.mic_only and self.include_mic:
             print("  > warning: no mic audio captured")
 
         # Live stats
@@ -395,11 +484,14 @@ class AudioRecorder:
     def _transcribe_final(self, mic_path: Path | None):
         """Run final high-quality transcription."""
         model_name = self.model.split("/")[-1]
-        print(f"  > transcribing with {model_name} (language: {self.language})...")
+        detect_speech = self.mic_only  # Use VAD for mic-only (filters silence)
+        print(f"  > transcribing with {model_name} (language: {self.whisper_language})...")
 
-        # Transcribe system audio
+        # Transcribe primary audio
         def transcribe_system():
-            result = transcribe_audio(self.output_path, self.model, self.language)
+            result = transcribe_audio(
+                self.output_path, self.model, self.whisper_language, detect_speech=detect_speech
+            )
             text = format_transcript(result["segments"]) or result["text"]
             output_path = self.output_path.with_suffix(".txt")
             output_path.write_text(text)
@@ -409,20 +501,20 @@ class AudioRecorder:
             print(f"  > saved {output_path.name} ({result['duration_seconds']:.1f}s)")
             return text
 
-        success, text = safe_execute(transcribe_system, "error transcribing system audio", critical=True)
+        success, text = safe_execute(transcribe_system, "error transcribing primary audio", critical=True)
 
-        # Transcribe mic audio
+        # Transcribe mic audio (only when not mic-only, since primary is already mic)
         mic_text = None
         if mic_path and mic_path.exists():
             def transcribe_mic():
                 print(f"  > transcribing mic with {model_name}...")
-                mic_result = transcribe_audio(mic_path, self.model, self.language, detect_speech=True)
+                mic_result = transcribe_audio(mic_path, self.model, self.whisper_language, detect_speech=True)
                 if mic_result["segments"]:
-                    mic_text = format_transcript(mic_result["segments"])
+                    result_text = format_transcript(mic_result["segments"])
                     mic_output = mic_path.with_suffix(".txt")
-                    mic_output.write_text(mic_text)
+                    mic_output.write_text(result_text)
                     print(f"  > saved {mic_output.name} ({mic_result['duration_seconds']:.1f}s)")
-                    return mic_text
+                    return result_text
                 return None
 
             _, mic_text = safe_execute(transcribe_mic, "error transcribing mic audio", critical=True)
@@ -431,7 +523,12 @@ class AudioRecorder:
         if self.summarize and text:
             def generate_summary():
                 from .summarizer import summarize_file
-                summary = summarize_file(self.output_path.with_suffix(".txt"), mic_transcript=mic_text)
+                summary = summarize_file(
+                    self.output_path.with_suffix(".txt"),
+                    meeting=self.meeting,
+                    mic_transcript=mic_text,
+                    language=self.language,
+                )
                 if summary:
                     print(LINE)
                     print(summary)

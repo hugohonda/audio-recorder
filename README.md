@@ -1,19 +1,11 @@
 # Audio Recorder
 
-Capture macOS system audio (Zoom calls, YouTube, Spotify) + microphone using ScreenCaptureKit. Live transcription with automatic summarization.
-
-**Features:**
-- 🎙️ System audio + microphone recording
-- 🌍 Multilingual (English, Portuguese, Spanish, etc.)
-- ⚡ Real-time transcription (Moonshine/Whisper)
-- 📝 High-quality final transcription (MLX Whisper)
-- 🤖 AI summarization (Gemini)
+Capture macOS system audio + microphone using ScreenCaptureKit. Live transcription, final transcription (MLX Whisper), and AI summarization (Gemini).
 
 ## Requirements
 
-- macOS 12.3+ (Monterey or later)
-- Python 3.12+
-- Screen Recording permission
+- macOS 12.3+, Python 3.12+
+- Screen Recording permission (`System Settings > Privacy & Security > Screen Recording`)
 
 ## Installation
 
@@ -23,75 +15,60 @@ cd audio-recorder
 uv sync
 ```
 
-## Usage
-
-### Record
+## Quick Start (Makefile)
 
 ```bash
-# Basic recording (saves to recordings/YYYY-MM-DD_HH-MM-SS.mp3)
-uv run audio-recorder record
+make record              # English, system + mic
+make record-mic          # English, mic only
+make record-live         # English, live transcription
+make record-live-mic     # English, live + mic only
 
-# Portuguese with live transcription
-uv run audio-recorder record --live --lang pt-br
+make record-pt           # Portuguese, system + mic
+make record-pt-mic       # Portuguese, mic only
+make record-pt-live      # Portuguese, live transcription
+make record-pt-live-mic  # Portuguese, live + mic only
+```
 
-# English with live transcription (faster)
-uv run audio-recorder record --live
+## CLI Usage
 
-# Options
-uv run audio-recorder record \
+```bash
+# Record
+uv run audio-recorder record [options]
   -d 60           # Duration in seconds
   -o meeting.mp3  # Custom filename
   --no-mic        # System audio only
+  --mic-only      # Mic audio only
+  --live          # Live transcription
   --no-final      # Skip final transcription
   --no-summary    # Skip AI summary
   -m turbo        # Whisper model (tiny/small/distil/turbo/large)
   -l pt-br        # Language (en/pt-br)
-```
 
-### Transcribe Existing Files
+# Transcribe existing file
+uv run audio-recorder transcribe recording.mp3 [-m large] [-l pt-br]
 
-```bash
-uv run audio-recorder transcribe recording.mp3
-uv run audio-recorder transcribe recording.mp3 -m large -l pt-br
-```
+# Summarize transcript
+uv run audio-recorder summarize transcript.txt [-l pt-br]
 
-### Summarize Transcript
-
-```bash
-uv run audio-recorder summarize transcript.txt
-```
-
-### List Models
-
-```bash
+# List models
 uv run audio-recorder models
 ```
 
-**Output files:**
-- `*.mp3` - Audio (system + mic_mic.mp3)
-- `*.txt` - Transcript with timestamps
-- `*_summary.md` - AI-generated summary
+## Output Files
 
-## First Run
-
-On first run, macOS will prompt for **Screen Recording** permission:
-
-`System Settings > Privacy & Security > Screen Recording`
+- `*.mp3` — Audio (system + `*_mic.mp3` for mic)
+- `*.txt` — Timestamped transcript
+- `*_summary.md` — AI-generated summary
 
 ## How It Works
 
 1. **ScreenCaptureKit** captures system audio at 16kHz mono
 2. **Microphone** captured at 24kHz, resampled to 16kHz
-3. **Live transcription** (optional):
-   - English: Moonshine (fastest, English-optimized)
-   - Portuguese/Other: Whisper-tiny (24x realtime, multilingual)
-4. **Final transcription**: MLX Whisper (high-quality)
-5. **Smart VAD**: Filters mic audio to remove silence
-6. **AI Summary**: Gemini generates structured meeting notes
-
-**Audio Format:**
-- 16kHz mono MP3 @ 64kbps (~480KB/min)
-- Optimized for speech transcription
+3. **Live transcription** — Moonshine (English) or Whisper-small (multilingual, 30x realtime)
+4. **Final transcription** — MLX Whisper (high-quality)
+5. **VAD** — Silero filters mic silence
+6. **Meeting detection** — Auto-detects active meeting from `meetings.json` for richer summaries
+7. **AI Summary** — Gemini generates structured meeting notes
 
 ## Project Structure
 
@@ -99,28 +76,19 @@ On first run, macOS will prompt for **Screen Recording** permission:
 src/audio_recorder/
 ├── cli.py         # CLI commands
 ├── capture.py     # ScreenCaptureKit audio capture
-├── live.py        # Live transcription (auto-selects engine)
-├── transcribe.py  # Whisper transcription utilities
+├── live.py        # Live transcription (Moonshine/Whisper)
+├── transcribe.py  # Batch transcription utilities
 ├── audio.py       # Audio processing (buffer, resample, VAD)
 ├── summarizer.py  # Gemini AI summarization
-└── meeting.py     # Meeting context (optional)
+└── meeting.py     # Meeting auto-detection
 ```
 
-## Key Dependencies
+## Dev
 
-- `pyobjc-framework-ScreenCaptureKit` - macOS audio capture
-- `mlx-whisper` - Transcription (MLX Whisper)
-- `useful-moonshine-onnx` - Live English transcription
-- `google-genai` - AI summarization (Gemini)
-- `silero-vad` - Voice activity detection
-- `lameenc` - MP3 encoding
-
-## Languages Supported
-
-Live transcription:
-- 🇺🇸 English (Moonshine - fastest)
-- 🇧🇷 Portuguese (Whisper-tiny - 24x realtime)
-- 🌍 All Whisper languages for final transcription
+```bash
+make lint    # ruff check + format
+make test    # pytest
+```
 
 ## License
 

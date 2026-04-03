@@ -19,26 +19,48 @@ def summary_path_for(path: Path) -> Path:
     return path.with_stem(path.stem + "_summary").with_suffix(".md")
 
 
-_MIC_TRANSCRIPT_SECTION = (
-    "## Hugo's Microphone Transcript\n"
-    "\n"
-    "The following transcript was captured directly from Hugo's microphone "
-    "during the meeting. It contains only Hugo's voice, recorded in isolation "
-    "from other participants.\n"
-    "\n"
-    "**How to use this:**\n"
-    "- Cross-reference these timestamps with the main transcript to identify "
-    "which statements are Hugo's.\n"
-    "- Attribute statements that match (or closely match) the mic transcript "
-    "content to Hugo.\n"
-    "- By elimination, attribute other statements to other participants.\n"
-    "- The mic transcript timings may not align perfectly with the main "
-    "transcript — use content matching as the primary signal.\n"
-    "\n"
-    "```\n"
-    "{mic_transcript}\n"
-    "```"
-)
+_MIC_TRANSCRIPT_SECTIONS = {
+    "en": (
+        "## Hugo's Microphone Transcript\n"
+        "\n"
+        "The following transcript was captured directly from Hugo's microphone "
+        "during the meeting. It contains only Hugo's voice, recorded in isolation "
+        "from other participants.\n"
+        "\n"
+        "**How to use this:**\n"
+        "- Cross-reference these timestamps with the main transcript to identify "
+        "which statements are Hugo's.\n"
+        "- Attribute statements that match (or closely match) the mic transcript "
+        "content to Hugo.\n"
+        "- By elimination, attribute other statements to other participants.\n"
+        "- The mic transcript timings may not align perfectly with the main "
+        "transcript — use content matching as the primary signal.\n"
+        "\n"
+        "```\n"
+        "{mic_transcript}\n"
+        "```"
+    ),
+    "pt-br": (
+        "## Transcrição do Microfone do Hugo\n"
+        "\n"
+        "A seguinte transcrição foi capturada diretamente do microfone do Hugo "
+        "durante a reunião. Contém apenas a voz do Hugo, gravada isoladamente "
+        "dos demais participantes.\n"
+        "\n"
+        "**Como usar:**\n"
+        "- Cruze os timestamps com a transcrição principal para identificar "
+        "quais falas são do Hugo.\n"
+        "- Atribua ao Hugo as falas que coincidam (ou sejam muito similares) "
+        "com o conteúdo da transcrição do microfone.\n"
+        "- Por eliminação, atribua as demais falas aos outros participantes.\n"
+        "- Os timestamps do microfone podem não se alinhar perfeitamente com a "
+        "transcrição principal — use a correspondência de conteúdo como sinal primário.\n"
+        "\n"
+        "```\n"
+        "{mic_transcript}\n"
+        "```"
+    ),
+}
 
 
 def summarize(
@@ -48,6 +70,7 @@ def summarize(
     location: str | None = None,
     meeting: dict | None = None,
     mic_transcript: str | None = None,
+    language: str = "en",
 ) -> str:
     """Summarize a transcript using Gemini and write the result to output_path.
 
@@ -59,17 +82,23 @@ def summarize(
     project = project or os.environ.get("VERTEX_PROJECT", "toptal-agent-ops")
     location = location or os.environ.get("VERTEX_LOCATION", "us-central1")
 
-    prompt_template = _PROMPT_PATH.read_text()
+    # Select prompt based on language
+    prompt_file = f"summary_{language}.md" if language == "pt-br" else "summary.md"
+    prompt_path = _PROMPT_PATH.parent / prompt_file
+    if not prompt_path.exists():
+        prompt_path = _PROMPT_PATH  # Fallback to English
+    prompt_template = prompt_path.read_text()
 
     if meeting:
         from .meeting import format_meeting_context
 
-        meeting_context = format_meeting_context(meeting)
+        meeting_context = format_meeting_context(meeting, language=language)
     else:
         meeting_context = ""
 
     if mic_transcript:
-        mic_section = _MIC_TRANSCRIPT_SECTION.replace("{mic_transcript}", mic_transcript)
+        mic_template = _MIC_TRANSCRIPT_SECTIONS.get(language, _MIC_TRANSCRIPT_SECTIONS["en"])
+        mic_section = mic_template.replace("{mic_transcript}", mic_transcript)
     else:
         mic_section = ""
 
@@ -96,6 +125,7 @@ def summarize_file(
     transcript_path: Path,
     meeting: dict | None = None,
     mic_transcript: str | None = None,
+    language: str = "en",
 ) -> str | None:
     """Read a transcript file, summarize it, and return the summary text.
 
@@ -111,6 +141,7 @@ def summarize_file(
             summary_path_for(transcript_path),
             meeting=meeting,
             mic_transcript=mic_transcript,
+            language=language,
         )
     except Exception as e:
         _log(f"summarization failed: {e}")
